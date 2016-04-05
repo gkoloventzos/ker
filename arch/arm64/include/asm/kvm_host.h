@@ -193,11 +193,57 @@ struct kvm_vm_stat {
 	u32 remote_tlb_flush;
 };
 
+#define TRAP_STAT_NR 9
+#define TRAP_HVC 0
+#define TRAP_WFX 1
+#define TRAP_IO_KERNEL 2
+#define TRAP_IO_USER 3
+#define TRAP_IRQ 4
+#define TRAP_TOTAL 5
+#define TRAP_GUEST 6
+#define TRAP_EL2 7
+
+
 struct kvm_vcpu_stat {
 	u32 halt_successful_poll;
 	u32 halt_attempted_poll;
 	u32 halt_wakeup;
+	unsigned long trap_stat[TRAP_STAT_NR];
+	unsigned long trap_number[TRAP_STAT_NR];
+       unsigned long ent_trap_cc;
+       unsigned long prev_trap_cc;
+       unsigned long prev_trap_type;
+       unsigned long last_enter_cc;
+       unsigned long this_exit_cc;
+       /* For EL2 Overhead */
+       unsigned long el2_exit_cc;
+       unsigned long el2_enter_cc;
+       /* For scheding Overhead */
+       unsigned long sched_out_cc;
+	unsigned long sched_diff_cc;
+	/* Pre handle_exit */
+	unsigned long hvsr_top_cc;
+	unsigned long hvsr_bot_cc;
+
+	/* Post handle_exit */
+	unsigned long hvsr_back_cc;
+	unsigned long hvsr_back_diff_cc;
+	unsigned long hvsr_back_sched_on;
+	unsigned long hvsr_back_sched_diff;
 };
+
+static inline unsigned long kvm_arm_read_cc(void)
+{
+        unsigned long cc;
+
+        asm volatile(
+                "isb\n"
+//                "mrs %0, cntvct_el0\n"
+		"mrs %0, CNTPCT_EL0\n"
+                "isb\n"
+                : [reg] "=r" (cc));
+        return cc;
+}
 
 int kvm_vcpu_preferred_target(struct kvm_vcpu_init *init);
 unsigned long kvm_arm_num_regs(struct kvm_vcpu *vcpu);
@@ -251,7 +297,9 @@ static inline void kvm_arch_hardware_disable(void) {}
 static inline void kvm_arch_hardware_unsetup(void) {}
 static inline void kvm_arch_sync_events(struct kvm *kvm) {}
 static inline void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu) {}
-static inline void kvm_arch_sched_in(struct kvm_vcpu *vcpu, int cpu) {}
+extern void kvm_arch_sched_in(struct kvm_vcpu *vcpu, int cpu);
+extern void kvm_arch_sched_out(struct kvm_vcpu *vcpu);
+void init_trap_stats(struct kvm_vcpu *vcpu);
 
 void kvm_arm_init_debug(void);
 void kvm_arm_setup_debug(struct kvm_vcpu *vcpu);

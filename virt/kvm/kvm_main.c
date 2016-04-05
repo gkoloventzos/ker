@@ -2030,7 +2030,9 @@ void kvm_vcpu_block(struct kvm_vcpu *vcpu)
 			break;
 
 		waited = true;
+		kvm_arch_sched_out(vcpu);
 		schedule();
+		kvm_arch_sched_in(vcpu, 1);
 	}
 
 	finish_wait(&vcpu->wq, &wait);
@@ -3518,6 +3520,7 @@ static void kvm_sched_out(struct preempt_notifier *pn,
 
 	if (current->state == TASK_RUNNING)
 		vcpu->preempted = true;
+	kvm_arch_sched_out(vcpu);
 	kvm_arch_vcpu_put(vcpu);
 }
 

@@ -39,6 +39,15 @@
 	.pushsection	.hyp.text, "ax"
 	.align	PAGE_SHIFT
 
+.macro read_ccounter reg
+	isb
+#       mrs \reg, PMCCNTR_EL0
+#	mrs \reg, cntvct_el0
+	mrs \reg, CNTPCT_EL0
+	isb
+.endm
+
+
 .macro save_common_regs
 	// x2: base address for cpu context
 	// x3: tmp register
@@ -171,10 +180,26 @@
 	// x19-x29, lr, sp*, elr*, spsr*
 	restore_common_regs
 
+       read_ccounter x2
+       str     x2, [x0, #VCPU_LAST_ENTER_CC]
+       ldr     x1, [x0, #VCPU_ENT_TRAP_CC]
+#ifdef KVM_MICRO_MEASURE
+       cmp     x1, #0x30000
+       bne     skip_micro
+       ldr     x1, [x0, #VCPU_HVSR_BOT_CC]
+       sub     x0, x2, x1
+       pop     x2, x3
+       add     sp, sp, #16
+       b       done
+skip_micro:
+#endif
+       sub     x2, x2, x1
+       str     x2, [x0, #VCPU_PREV_TRAP_CC]
+
 	// Last bits of the 64bit state
 	pop	x2, x3
 	pop	x0, x1
-
+done:
 	// Do not touch any register after this!
 .endm
 
@@ -970,6 +995,9 @@ el1_sync:					// Guest trapped into EL2
 	push	x0, x1
 	push	x2, x3
 
+	read_ccounter x2
+	push    x1, x2
+
 	mrs	x1, esr_el2
 	lsr	x2, x1, #ESR_ELx_EC_SHIFT
 
@@ -980,6 +1008,7 @@ el1_sync:					// Guest trapped into EL2
 	cbnz	x3, el1_trap			// called HVC
 
 	/* Here, we're pretty sure the host called HVC. */
+	add     sp, sp, #16
 	pop	x2, x3
 	pop	x0, x1
 
@@ -1067,6 +1096,9 @@ alternative_endif
 	str	x2, [x0, #VCPU_FAR_EL2]
 	str	x3, [x0, #VCPU_HPFAR_EL2]
 
+	pop     x1, x2
+       str     x2, [x0, #VCPU_ENT_TRAP_CC]
+
 	mov	x1, #ARM_EXCEPTION_TRAP
 	b	__kvm_vcpu_return
 
@@ -1084,6 +1116,8 @@ el1_irq:
 	push	x0, x1
 	push	x2, x3
 	mrs	x0, tpidr_el2
+        read_ccounter x2
+        str     x2, [x0, #VCPU_ENT_TRAP_CC]
 	mov	x1, #ARM_EXCEPTION_IRQ
 	b	__kvm_vcpu_return
 
