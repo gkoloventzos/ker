@@ -1568,33 +1568,9 @@ static int add_callchain_ip(struct thread *thread,
 	if (!cpumode) {
 		thread__find_cpumode_addr_location(thread, MAP__FUNCTION,
 						   ip, &al);
-	} else {
-		if (ip >= PERF_CONTEXT_MAX) {
-			switch (ip) {
-			case PERF_CONTEXT_HV:
-				*cpumode = PERF_RECORD_MISC_HYPERVISOR;
-				break;
-			case PERF_CONTEXT_KERNEL:
-				*cpumode = PERF_RECORD_MISC_KERNEL;
-				break;
-			case PERF_CONTEXT_USER:
-				*cpumode = PERF_RECORD_MISC_USER;
-				break;
-			default:
-				pr_debug("invalid callchain context: "
-					 "%"PRId64"\n", (s64) ip);
-				/*
-				 * It seems the callchain is corrupted.
-				 * Discard all.
-				 */
-				callchain_cursor_reset(&callchain_cursor);
-				return 1;
-			}
-			return 0;
-		}
+	} else 
 		thread__find_addr_location(thread, *cpumode, MAP__FUNCTION,
 					   ip, &al);
-	}
 
 	if (al.sym != NULL) {
 		if (sort__has_parent && !*parent &&
@@ -1757,6 +1733,7 @@ static int thread__resolve_callchain_sample(struct thread *thread,
 	int i, j, err;
 	int skip_idx = -1;
 	int first_call = 0;
+	u8 cpumode = PERF_RECORD_MISC_USER;
 
 	callchain_cursor_reset(&callchain_cursor);
 
@@ -1851,10 +1828,42 @@ check_calls:
 #endif
 		ip = chain->ips[j];
 
+		if (ip >= PERF_CONTEXT_MAX) {
+			switch (ip) {
+			case PERF_CONTEXT_HV:
+				cpumode = PERF_RECORD_MISC_HYPERVISOR;
+				break;
+			case PERF_CONTEXT_KERNEL:
+				cpumode = PERF_RECORD_MISC_KERNEL;
+				break;
+			case PERF_CONTEXT_USER:
+				cpumode = PERF_RECORD_MISC_USER;
+				break;
+			case PERF_CONTEXT_GUEST_KERNEL:
+				cpumode = PERF_RECORD_MISC_GUEST_KERNEL;
+				break;
+			case PERF_CONTEXT_GUEST_USER:
+				cpumode = PERF_RECORD_MISC_GUEST_USER;
+				break;
+			default:
+				pr_debug("invalid callchain context: "
+					"%"PRId64"\n", (s64) ip);
+				/*
+				 * It seems the callchain is corrupted.
+				 * Discard all.
+				 */
+				callchain_cursor_reset(&callchain_cursor);
+				return 0;
+			}
+			continue;
+		}
+
 		err = add_callchain_ip(thread, parent, root_al, &cpumode, ip);
 
+		if (err == -EINVAL)
+			break;
 		if (err)
-			return (err < 0) ? err : 0;
+			return err;
 	}
 
 	return 0;

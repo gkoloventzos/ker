@@ -2460,6 +2460,9 @@ int kvm_set_irq(struct kvm *kvm, int irq_source_id,
 
 	BUG_ON(!vgic_initialized(kvm));
 
+	if (spi > kvm->arch.vgic.nr_irqs)
+		return -EINVAL;
+
 	return kvm_vgic_inject_irq(kvm, 0, spi, level);
 }
 

@@ -39,6 +39,12 @@
 	.pushsection	.hyp.text, "ax"
 	.align	PAGE_SHIFT
 
+.macro read_pcounter reg
+	isb
+	mrs \reg, CNTPCT_EL0
+	isb
+.endm
+
 .macro save_common_regs
 	// x2: base address for cpu context
 	// x3: tmp register
@@ -170,6 +176,17 @@
 
 	// x19-x29, lr, sp*, elr*, spsr*
 	restore_common_regs
+
+	read_pcounter x2
+       ldr     x1, [x0, #VCPU_NEW_EDATA]
+       kern_hyp_va x1
+       str     x2, [x1, #EDATA_ENTRY_EL2]
+
+       // We are done with an obervation, switch new and prev edata pointers
+       ldr     x2, [x0, #VCPU_PREV_EDATA] // prev = s->prev_edata
+       ldr     x1, [x0, #VCPU_NEW_EDATA] // new = s->new_edata
+       str     x1, [x0, #VCPU_PREV_EDATA] // s->prev_edata = new
+       str     x2, [x0, #VCPU_NEW_EDATA]  // s->new_edata = prev
 
 	// Last bits of the 64bit state
 	pop	x2, x3
@@ -802,6 +819,70 @@ __kvm_vcpu_return:
 	ret
 END(__kvm_vcpu_run)
 
+// phys_addr_t __kvm_gva_to_gpa(struct kvm *kvm, struct kvm_vcpu *vcpu,
+//                             unsigned long gva);
+ENTRY(__kvm_gva_to_gpa)
+       dsb     ishst
+
+       kern_hyp_va     x0
+       ldr     x0, [x0, #KVM_VTTBR]
+       msr     vttbr_el2, x0
+       isb
+
+       push    lr, xzr
+       push    x8, x9
+       push    x16, x17
+       push    x18, x19
+       push    x20, x21
+       push    x22, x23
+       push    x24, x25
+       push    x26, x27
+       push    x28, x29
+
+       mov     x0, x2 // x0 = gva
+
+       kern_hyp_va     x1
+       ldr     x2, [x1, #VCPU_HCR_EL2]
+       msr     hcr_el2, x2
+       isb
+
+       ldr     x2, [x1, #VCPU_HOST_CONTEXT]
+       kern_hyp_va     x2
+       bl      __save_sysregs
+
+       add     x2, x1, #VCPU_CONTEXT
+       bl __restore_sysregs
+       isb
+
+       at      s1e1r, x0
+       isb
+       mrs     x0, par_el1
+
+       //x2 still VCPU_CONTEXT
+       bl __save_sysregs // TODO: Can this be omitted?
+
+       ldr     x2, [x1, #VCPU_HOST_CONTEXT]
+       kern_hyp_va x2
+       bl __restore_sysregs
+
+       mov     x2, #HCR_RW
+       msr     hcr_el2, x2
+
+       pop     x28, x29
+       pop     x26, x27
+       pop     x24, x25
+       pop     x22, x23
+       pop     x20, x21
+       pop     x18, x19
+       pop     x16, x17
+       pop     x8, x9
+       pop     lr, xzr
+
+
+       msr     vttbr_el2, xzr
+       ret
+ENDPROC(__kvm_gva_to_gpa)
+
 // void __kvm_tlb_flush_vmid_ipa(struct kvm *kvm, phys_addr_t ipa);
 ENTRY(__kvm_tlb_flush_vmid_ipa)
 	dsb	ishst
@@ -970,6 +1051,9 @@ el1_sync:					// Guest trapped into EL2
 	push	x0, x1
 	push	x2, x3
 
+	read_pcounter x2
+	push    x1, x2
+
 	mrs	x1, esr_el2
 	lsr	x2, x1, #ESR_ELx_EC_SHIFT
 
@@ -980,6 +1064,7 @@ el1_sync:					// Guest trapped into EL2
 	cbnz	x3, el1_trap			// called HVC
 
 	/* Here, we're pretty sure the host called HVC. */
+	add     sp, sp, #16                     // Ignore read_pcounter
 	pop	x2, x3
 	pop	x0, x1
 
@@ -1067,6 +1152,12 @@ alternative_endif
 	str	x2, [x0, #VCPU_FAR_EL2]
 	str	x3, [x0, #VCPU_HPFAR_EL2]
 
+	/* Store the read_pcounter result */
+       pop     x1, x2
+       ldr     x1, [x0, #VCPU_NEW_EDATA]
+       kern_hyp_va x1
+       str     x2, [x1, #EDATA_EXIT_EL2]
+
 	mov	x1, #ARM_EXCEPTION_TRAP
 	b	__kvm_vcpu_return
 
@@ -1084,6 +1175,10 @@ el1_irq:
 	push	x0, x1
 	push	x2, x3
 	mrs	x0, tpidr_el2
+	read_pcounter x2
+       ldr     x1, [x0, #VCPU_NEW_EDATA]
+       kern_hyp_va x1
+       str     x2, [x1, #EDATA_EXIT_EL2]
 	mov	x1, #ARM_EXCEPTION_IRQ
 	b	__kvm_vcpu_return
 

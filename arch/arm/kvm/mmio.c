@@ -211,9 +211,12 @@ int io_mem_abort(struct kvm_vcpu *vcpu, struct kvm_run *run,
 	if (!ret) {
 		/* We handled the access successfully in the kernel. */
 		kvm_handle_mmio_return(vcpu, run);
+		if (vcpu->stat.exit_stats.new_edata->trap_reason != TRAP_IO_SGI)
+			kvm_trap_stat_set_exit_reason(vcpu, TRAP_IO_KERNEL);
 		return 1;
 	}
 
 	run->exit_reason	= KVM_EXIT_MMIO;
+	kvm_trap_stat_set_exit_reason(vcpu, TRAP_IO_USER);
 	return 0;
 }
