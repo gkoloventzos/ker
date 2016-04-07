@@ -202,7 +202,7 @@ struct kvm_vm_stat {
 #define TRAP_TOTAL 5
 #define TRAP_GUEST 6
 #define TRAP_EL2 7
-
+#define TRAP_NON_VCPU 8
 
 struct kvm_vcpu_stat {
 	u32 halt_successful_poll;

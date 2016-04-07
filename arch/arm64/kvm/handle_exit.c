@@ -70,17 +70,55 @@ static void print_all_vcpu_trap_stats(struct kvm_vcpu *vcpu)
 }
 
 
+extern bool enable_trap_stats;
+
+static const char* trap_stat_names[TRAP_STAT_NR] = {
+       [TRAP_HVC] = "TRAP HVC",
+       [TRAP_WFX] = "TRAP WFX",
+       [TRAP_IO_KERNEL] = "TRAP IO_KERNEL",
+       [TRAP_IO_USER] = "TRAP IO_USER",
+       [TRAP_IRQ] = "TRAP IRQ",
+       [TRAP_TOTAL] = "TRAP TOTAL",
+       [TRAP_GUEST] = "TRAP GUEST",
+       [TRAP_EL2] = "TRAP EL2",
+       [TRAP_NON_VCPU] = "TRAP NON-VCPU",
+};
+
+static void print_vcpu_trap_stats(struct kvm_vcpu *vcpu)
+{
+       int i;
+
+       printk("vcpu id %d\n", vcpu->vcpu_id);
+       for (i = 0; i < TRAP_STAT_NR; i++)
+               printk("%s CYCLE %lu number: %lu\n",
+                               trap_stat_names[i],
+                               vcpu->stat.trap_stat[i],
+                               vcpu->stat.trap_number[i]);
+       printk("TRAP IN %lu\n", vcpu->stat.hvsr_top_cc);
+       printk("TRAP BACK %lu\n", vcpu->stat.hvsr_back_cc);
+}
+
+static void print_all_vcpu_trap_stats(struct kvm_vcpu *vcpu)
+{
+       struct kvm_vcpu *v;
+       int r;
+
+       kvm_for_each_vcpu(r, v, vcpu->kvm)
+               print_vcpu_trap_stats(v);
+}
+
+
 static int handle_hvc(struct kvm_vcpu *vcpu, struct kvm_run *run)
 {
 	int ret;
-       uint32_t tmp;
+	uint32_t tmp;
 
        vcpu->stat.prev_trap_type = TRAP_HVC;
        /*
         * Enable cycle counter for Xen - we choose to be compatible but rely
         * on running measurement guests under perf on the KVM host.
         */
-       if (*vcpu_reg(vcpu, 0) == 0x4b000001) {
+       if (vcpu_get_reg(vcpu, 0) == 0x4b000001) {
 
                asm volatile(   "mrs %0, PMCR_EL0\n"
                                "orr %0, %0, #1\n"
@@ -105,30 +143,30 @@ static int handle_hvc(struct kvm_vcpu *vcpu, struct kvm_run *run)
        }
 
        /* NOOP hvc call to measure hypercall turn-around time */
-       if (*vcpu_reg(vcpu, 0) == 0x4b000000) {
+       if (vcpu_get_reg(vcpu, 0) == 0x4b000000) {
                return 1;
-	}
-	else if (*vcpu_reg(vcpu, 0) == 0x20000) {
-               *vcpu_reg(vcpu, 0) = vcpu->stat.hvsr_top_cc;
+       } else if (vcpu_get_reg(vcpu, 0) == 0x20000) {
+               vcpu_set_reg(vcpu, 0, vcpu->stat.hvsr_top_cc);
                return 1;
-	} else if (*vcpu_reg(vcpu, 0) == 0x30000) {
+       } else if (vcpu_get_reg(vcpu, 0) == 0x30000) {
                return 1;
-	}
+       }
+
        /* Trap stat enable */
-       if (*vcpu_reg(vcpu, 0) == 0x10000) {
+       if (vcpu_get_reg(vcpu, 0) == 0x10000) {
                init_trap_stats(vcpu);
-		isb();
+               isb();
                enable_trap_stats = true;
                return 1;
        }
 
        /* Trap stat disable & print out stats */
-       if (*vcpu_reg(vcpu, 0) == 0x11000) {
+       if (vcpu_get_reg(vcpu, 0) == 0x11000) {
                enable_trap_stats = false;
-		isb();
+               isb();
                print_all_vcpu_trap_stats(vcpu);
                return 1;
-       }
+	}
 
 	trace_kvm_hvc_arm64(*vcpu_pc(vcpu), vcpu_get_reg(vcpu, 0),
 			    kvm_vcpu_hvc_get_imm(vcpu));
