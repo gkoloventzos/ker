@@ -61,6 +61,118 @@ static atomic64_t kvm_vmid_gen = ATOMIC64_INIT(1);
 static u8 kvm_next_vmid;
 static DEFINE_SPINLOCK(kvm_vmid_lock);
 
+bool enable_trap_stats = false;
+
+void kvm_arch_el2_exit_top(struct kvm_vcpu *vcpu)
+{
+	u32 hsr = kvm_vcpu_get_hsr(vcpu);
+        u8 hsr_ec = hsr >> ESR_ELx_EC_SHIFT;
+	unsigned long ret_cc;
+
+	if ((hsr_ec == ESR_ELx_EC_HVC64) && (vcpu_get_reg(vcpu, 0) == 0x20000)) {
+		ret_cc = kvm_arm_read_cc() -
+			vcpu->stat.ent_trap_cc;
+		vcpu->stat.hvsr_top_cc = ret_cc - vcpu->stat.sched_diff_cc;
+	}
+}
+
+void kvm_arch_el2_exit_bot(struct kvm_vcpu *vcpu)
+{
+	u32 hsr = kvm_vcpu_get_hsr(vcpu);
+        u8 hsr_ec = hsr >> ESR_ELx_EC_SHIFT;
+
+	if ((hsr_ec == ESR_ELx_EC_HVC64) && (vcpu_get_reg(vcpu, 0) == 0x30000)) {
+		vcpu->stat.hvsr_bot_cc = kvm_arm_read_cc();
+		vcpu->stat.ent_trap_cc = 0x30000;
+	}
+}
+
+void kvm_arch_sched_in(struct kvm_vcpu *vcpu, int cpu)
+{
+	unsigned long tmp;
+	unsigned long diff;
+
+	if (enable_trap_stats == false)
+		return;
+
+	tmp = kvm_arm_read_cc();
+	/*Prevent overflow*/
+	if (tmp > vcpu->stat.sched_out_cc)
+		diff = tmp - vcpu->stat.sched_out_cc;
+	else
+		diff = 0;
+
+	vcpu->stat.sched_diff_cc += diff;
+	if (vcpu->stat.hvsr_back_sched_on)
+		vcpu->stat.hvsr_back_sched_diff += diff;
+
+	++vcpu->stat.trap_number[TRAP_NON_VCPU];
+}
+
+void kvm_arch_sched_out(struct kvm_vcpu *vcpu)
+{
+
+	if (enable_trap_stats == false)
+		return;
+
+	vcpu->stat.sched_out_cc = kvm_arm_read_cc();
+}
+
+static void update_trap_stats(struct kvm_vcpu *vcpu)
+{
+	unsigned type;
+
+	type = vcpu->stat.prev_trap_type;
+	if (type != -1) {
+		vcpu->stat.trap_stat[type] += vcpu->stat.prev_trap_cc;
+		++vcpu->stat.trap_number[type];
+	}
+	vcpu->stat.prev_trap_type = -1;
+
+	vcpu->stat.trap_stat[TRAP_TOTAL] += vcpu->stat.prev_trap_cc;
+	++vcpu->stat.trap_number[TRAP_TOTAL];
+	vcpu->stat.trap_stat[TRAP_GUEST] += (vcpu->stat.ent_trap_cc -
+			vcpu->stat.last_enter_cc);
+
+	vcpu->stat.trap_stat[TRAP_EL2] += (vcpu->stat.el2_exit_cc -
+			vcpu->stat.ent_trap_cc) +
+			(vcpu->stat.last_enter_cc -
+				vcpu->stat.el2_enter_cc);
+}
+
+void __init_trap_stats(struct kvm_vcpu *vcpu)
+{
+	u32 tmp;
+
+	vcpu->stat.prev_trap_type = -1;
+	//vcpu->stat.prev_trap_cc = 0;
+	vcpu->stat.ent_trap_cc = kvm_arm_read_cc();
+	vcpu->stat.el2_enter_cc = 0;
+	vcpu->stat.el2_exit_cc = 0;
+	vcpu->stat.sched_out_cc = -1;
+	vcpu->stat.sched_diff_cc = 0;
+	vcpu->stat.hvsr_top_cc = 0;
+	vcpu->stat.hvsr_bot_cc = 0;
+	vcpu->stat.hvsr_back_cc = 0;
+	vcpu->stat.hvsr_back_diff_cc = 0;
+	vcpu->stat.hvsr_back_sched_on = 0;
+	vcpu->stat.hvsr_back_sched_diff = 0;
+
+	for (tmp=0; tmp<TRAP_STAT_NR; tmp++) {
+		vcpu->stat.trap_stat[tmp] = 0;
+		vcpu->stat.trap_number[tmp] = 0;
+	}
+}
+
+void init_trap_stats(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu *v;
+	int r;
+
+	kvm_for_each_vcpu(r, v, vcpu->kvm)
+		__init_trap_stats(v);
+}
+
 static void kvm_arm_set_running_vcpu(struct kvm_vcpu *vcpu)
 {
 	BUG_ON(preemptible());
@@ -172,7 +284,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	int r;
 	switch (ext) {
 	case KVM_CAP_IRQCHIP:
-	case KVM_CAP_IOEVENTFD:
+	case KVM_CAP_IRQFD:
 	case KVM_CAP_DEVICE_CTRL:
 	case KVM_CAP_USER_MEMORY:
 	case KVM_CAP_SYNC_MMU:
@@ -182,6 +294,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_ARM_PSCI_0_2:
 	case KVM_CAP_READONLY_MEM:
 	case KVM_CAP_MP_STATE:
+	case KVM_CAP_IOEVENTFD:
 		r = 1;
 		break;
 	case KVM_CAP_COALESCED_MMIO:
@@ -315,6 +428,12 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
 	kvm_arm_set_running_vcpu(NULL);
 }
 
+/*int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
+					struct kvm_guest_debug *dbg)
+{
+	return -EINVAL;
+}*/
+
 int kvm_arch_vcpu_ioctl_get_mpstate(struct kvm_vcpu *vcpu,
 				    struct kvm_mp_state *mp_state)
 {
@@ -447,11 +566,51 @@ static int kvm_vcpu_first_run_init(struct kvm_vcpu *vcpu)
 {
 	struct kvm *kvm = vcpu->kvm;
 	int ret;
+	u32 tmp;
 
 	if (likely(vcpu->arch.has_run_once))
 		return 0;
 
 	vcpu->arch.has_run_once = true;
+#ifdef CONFIG_ARM
+	asm volatile(	"mrc p15, 0, %0, c9, c12, 0\n" /* PMCR */
+			"orr %0, %0, #1\n"      /* PMCR.E=1 */
+			"orr %0, %0, #(1 << 2)\n"       /* Reset Cycle cnt */
+			"bic %0, %0, #(1 << 3)\n"       /* Count each cycle */
+			"mcr p15, 0, %0, c9, c12, 0\n" /* PMCR */
+			"mov %0, #0b11111\n"    /* Select cycle cnt */
+			"mcr p15, 0, %0, c9, c12, 5\n" /* PCSELR */
+			"isb \n"
+			"mrc p15, 0, %0, c9, c13, 1\n" /* PMXEVTYPER */
+			"orr %0, %0, #(1 << 27)\n"      /* Count PL2 */
+			"bic %0, %0, #(3 << 30)\n"      /* not NS PL1, PL0 */
+			"bic %0, %0, #(3 << 28)\n"      /* SBZ */
+			"mcr p15, 0, %0, c9, c13, 1\n" /* PMXEVTYPER */
+			"mrc p15, 0, %0, c9, c12, 1\n" /* PMCNTENSET */
+			"orr %0, %0, #(1 << 31)\n"      /* Enable Cycle cnt */
+			"mcr p15, 0, %0, c9, c12, 1\n"  /* PMCNTENSET */
+			: "=r" (tmp));
+#else
+	asm volatile(   "mrs %0, PMCR_EL0\n"
+			"orr %0, %0, #1\n"
+			"orr %0, %0, #(1 << 2)\n"
+			"bic %0, %0, #(1 << 3)\n"
+			"msr PMCR_EL0, %0\n"
+			"mov %0, #0b11111\n"
+			"msr PMSELR_EL0, %0\n"
+			"isb \n"
+			"mrs %0, PMXEVTYPER_EL0\n"
+			"orr %0, %0, #(1 << 27)\n"
+			"bic %0, %0, #(3 << 30)\n"
+			"bic %0, %0, #(3 << 28)\n"
+			"msr PMXEVTYPER_EL0, %0\n"
+			"mrs %0, PMCNTENSET_EL0\n"
+			"orr %0, %0, #(1 << 31)\n"
+			"msr PMCNTENSET_EL0, %0\n"
+			: "=r" (tmp));
+#endif
+	isb();
+	init_trap_stats(vcpu);
 
 	/*
 	 * Map the VGIC hardware resources before running a vcpu the first
@@ -532,7 +691,9 @@ static int kvm_vcpu_initialized(struct kvm_vcpu *vcpu)
 int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 {
 	int ret;
+	int ret_el2;
 	sigset_t sigsaved;
+	unsigned long back_diff_cc;
 
 	if (unlikely(!kvm_vcpu_initialized(vcpu)))
 		return -ENOEXEC;
@@ -553,6 +714,15 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 	ret = 1;
 	run->exit_reason = KVM_EXIT_UNKNOWN;
 	while (ret > 0) {
+		if (enable_trap_stats == true && (vcpu->stat.hvsr_back_diff_cc == -1)) {
+			vcpu->stat.hvsr_back_diff_cc = kvm_arm_read_cc();
+			vcpu->stat.hvsr_back_sched_on = 1;
+		}
+
+#ifdef KVM_MICRO_MEASURE
+		/* Measure handle exit to el2 cost*/
+		kvm_arch_el2_exit_bot(vcpu);
+#endif
 		/*
 		 * Check conditions before entering the guest
 		 */
@@ -600,15 +770,36 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 		__kvm_guest_enter();
 		vcpu->mode = IN_GUEST_MODE;
 
+		if (enable_trap_stats == true) {
+			vcpu->stat.el2_enter_cc = kvm_arm_read_cc();
+			vcpu->stat.trap_stat[TRAP_NON_VCPU] +=
+				vcpu->stat.sched_diff_cc;
+			vcpu->stat.sched_diff_cc = 0;
+			vcpu->stat.hvsr_back_sched_on = 0;
+		}
+
 		ret = kvm_call_hyp(__kvm_vcpu_run, vcpu);
 
 		vcpu->mode = OUTSIDE_GUEST_MODE;
 		/*
 		 * Back from guest
 		 *************************************************************/
+		if (enable_trap_stats == true) {
+			if (vcpu->stat.hvsr_back_diff_cc != 0) {
+				back_diff_cc = vcpu->stat.last_enter_cc
+						- vcpu->stat.hvsr_back_diff_cc;
+				back_diff_cc -= vcpu->stat.hvsr_back_sched_diff;
+				vcpu->stat.hvsr_back_cc += back_diff_cc;
+				vcpu->stat.hvsr_back_sched_diff = 0;
+			}
+			vcpu->stat.el2_exit_cc = kvm_arm_read_cc();
+			update_trap_stats(vcpu);
+		}
 
 		kvm_arm_clear_debug(vcpu);
 
+		if (ret == ARM_EXCEPTION_IRQ)
+			vcpu->stat.prev_trap_type = TRAP_IRQ;
 		/*
 		 * We may have taken a host interrupt in HYP mode (ie
 		 * while executing the guest). This interrupt is still
@@ -643,7 +834,23 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 
 		preempt_enable();
 
+		/* Measure el2 to handle exit cost*/
+		ret_el2 = ret;
+#ifdef KVM_MICRO_MEASURE
+		kvm_arch_el2_exit_top(vcpu);
+#endif
+		if (enable_trap_stats == true && (ret != ARM_EXCEPTION_IRQ)) {
+			vcpu->stat.hvsr_top_cc += kvm_arm_read_cc() -
+						vcpu->stat.ent_trap_cc;
+			vcpu->stat.hvsr_top_cc -= vcpu->stat.sched_diff_cc;
+		}
 		ret = handle_exit(vcpu, run, ret);
+		if (enable_trap_stats == true) {
+			if (ret_el2 == ARM_EXCEPTION_IRQ)
+				vcpu->stat.hvsr_back_diff_cc = 0;
+			else
+				vcpu->stat.hvsr_back_diff_cc = -1;
+		}
 	}
 
 	if (vcpu->sigset_active)
