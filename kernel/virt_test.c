@@ -807,6 +807,7 @@ static int __init virt_test_init(void)
 		return ret;
 	}
 
+	call_hyp((void*)HVC_CCNT_ENABLE);
 	proc_create("virttest", 0, NULL, &virttest_proc_fops);
 	proc_create("virttest_one", 0, NULL, &virttest_once_proc_fops);
 	proc_create("iolat", 0, NULL, &virttest_iolat_fops);
